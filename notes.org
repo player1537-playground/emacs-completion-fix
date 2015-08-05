@@ -1,0 +1,350 @@
+# -*- org-export-html-style-include-scripts: nil; org-export-html-style-include-default: nil; org-export-html-style: "<link rel=\"stylesheet\" type=\"text/css\" href=\"style.css\" />"; -*-
+* Problem
+  When writing Makefiles that use complex functions for generating
+  rules, such as the following
+
+  #+NAME: short-makefile
+  #+BEGIN_SRC makefile
+    define my_rule
+    target/$1/$2.txt: source/$1/$2.png
+      mkdir -p $$(dir $$@)
+      touch $$@
+    endef
+
+    $(foreach X,A B C, \
+      $(foreach Y,1 2 3, \
+        $(eval $(call my_rule,$(X),$(Y)))))
+  #+END_SRC
+
+  We expect that this should be equivalent to the following Makefile:
+
+  #+NAME: long-makefile
+  #+BEGIN_SRC makefile
+    target/A/1.txt: source/A/1.png
+      mkdir -p $(dir $@)
+      touch $$@
+
+    target/A/2.txt: source/A/2.png
+      mkdir -p $(dir $@)
+      touch $$@
+
+    target/A/3.txt: source/A/3.png
+      mkdir -p $(dir $@)
+      touch $$@
+
+    target/B/1.txt: source/B/1.png
+      mkdir -p $(dir $@)
+      touch $$@
+
+    target/B/2.txt: source/B/2.png
+      mkdir -p $(dir $@)
+      touch $$@
+
+    target/B/3.txt: source/B/3.png
+      mkdir -p $(dir $@)
+      touch $$@
+
+    target/C/1.txt: source/C/1.png
+      mkdir -p $(dir $@)
+      touch $$@
+
+    target/C/2.txt: source/C/2.png
+      mkdir -p $(dir $@)
+      touch $$@
+
+    target/C/3.txt: source/C/3.png
+      mkdir -p $(dir $@)
+      touch $$@
+  #+END_SRC
+
+  However, Emacs doesn't see these files as the same, which shows when
+  trying to complete filenames from :M-x shell:.
+
+  #+BEGIN_EXAMPLE
+    short$ make ^I
+    short$ make target/\$1/\$2.txt
+
+    long$ make ^I
+    long$ make target/
+
+    In this buffer, type RET to select the completion near point.
+
+    Possible completions are:
+    target/A/1.txt     target/A/2.txt     target/A/3.txt     target/B/1.txt
+    target/B/2.txt     target/B/3.txt     target/C/1.txt     target/C/2.txt
+    target/C/3.txt
+
+    long$ make target/A/1^I
+    long$ make target/A/1.txt
+  #+END_EXAMPLE
+
+* Possible Solution: Query Make's Database
+  One way to fix this is to work off of the =make='s computed rules:
+
+  #+BEGIN_SRC sh
+    short$ make -qRrp 2>/dev/null | sed -ne 's/^\([^.#][^:=]*\):[^=]*$/\1/p'
+    target/$1/$2.txt
+    source/B/1.png
+    target/C/3.txt
+    source/B/2.png
+    target/B/1.txt
+    source/C/2.png
+    source/C/1.png
+    Makefile
+    source/B/3.png
+    source/A/2.png
+    source/C/3.png
+    target/A/1.txt
+    target/A/2.txt
+    target/C/1.txt
+    target/B/2.txt
+    target/A/3.txt
+    source/A/3.png
+    target/B/3.txt
+    target/C/2.txt
+    source/A/1.png
+  #+END_SRC
+
+  The options for make are:
+
+  * ~-q~ | ~--question~ :: Do not run any recipes
+  * ~-R~ | ~--no-builtin-variables~ :: Eliminate builtin
+       rule-specific variables
+  * ~-r~ | ~--no-builtin-rules~ :: Eliminate builtin implicit rules
+       (like ~.c~)
+  * ~-p~ | ~--print-data-base~ :: Print out all the rules understood
+       by ~make~
+  * ~2>/dev/null~ :: ~make~ was complaining that the source files
+                     weren't present, so this suppresses that message.
+
+  The sed expression is, in parts:
+
+  * ~^[^.#]~ :: Match anything that starts with a non-dot (There is a
+                rule ~.SUFFIXES~ that ~make~ prints out. This excludes
+                those rules). Also remove any comments.
+
+  * ~[^:=]*~ :: Match any characters that can make up the start of a
+                rule. Colons are excluded because they are what
+                signify the separate parts of the rule. Equal signs
+                are similarly excluded because they are used in
+                setting variables.
+
+  * ~:[^=]*$~ :: This ensures that after the previous characters is a
+                 colon (and is therefore a rule). An additional check
+                 is made that the line isn't a ~:=~ variable
+                 declaration by ensuring there are no equal signs on
+                 the remainder of the line.
+
+  * ~\1~ :: Grab only the target portion of the rule.
+
+  * ~/p~ :: Because we're using ~sed~ with ~-n~ (to suppress
+            automatically printing each line), we have to tell it we
+            want to actually print any line that matches this regular
+            expression.
+
+  Once we have this list of targets, we just need to somehow hook into
+  the tab completion for Emacs.
+
+* Understanding Shell Completion
+  The first step when trying to find information like this is going
+  off of what we know, which is that Emacs will autocomplete for us
+  when we hit TAB in the shell. Using =C-h k TAB= while at a shell
+  prompt, we see that the function is bound to ~completion-at-point~.
+
+  #+BEGIN_EXAMPLE
+    TAB runs the command completion-at-point, which is an interactive
+    compiled Lisp function.
+
+    It is bound to TAB, <menu-bar> <completion> <complete>.
+
+    (completion-at-point)
+
+    Perform completion on the text around point.
+    The completion method is determined by `completion-at-point-functions'.
+
+    [back]
+  #+END_EXAMPLE
+
+  Searching for this function in the Emacs code base on Github, we get
+  [[https://github.com/emacs-mirror/emacs/search?utf8=%E2%9C%93&q=completion-at-point+shell&type=Code][these results]], with the first result (=lisp/shell.el=) looking the
+  most promising.
+
+  From here, we search for our original query and find the function
+  [[https://github.com/emacs-mirror/emacs/blob/d97fbcbedce8f36050af7a55d34c6ed50c99507c/lisp/shell.el#L454-L483][~shell-completion-vars~]], reproduced below:
+
+  #+BEGIN_SRC lisp
+    (defun shell-completion-vars ()
+      "Setup completion vars for `shell-mode' and `read-shell-command'."
+      (set (make-local-variable 'comint-completion-fignore)
+           shell-completion-fignore)
+      (set (make-local-variable 'comint-delimiter-argument-list)
+           shell-delimiter-argument-list)
+      (set (make-local-variable 'comint-file-name-chars) shell-file-name-chars)
+      (set (make-local-variable 'comint-file-name-quote-list)
+           shell-file-name-quote-list)
+
+      ;; vvvvvvvv
+      (set (make-local-variable 'comint-dynamic-complete-functions)
+           shell-dynamic-complete-functions)
+      ;; ^^^^^^^^
+
+      (setq-local comint-unquote-function #'shell--unquote-argument)
+      (setq-local comint-requote-function #'shell--requote-argument)
+      (set (make-local-variable 'pcomplete-parse-arguments-function)
+           #'shell--parse-pcomplete-arguments)
+      (set (make-local-variable 'pcomplete-termination-string)
+           (cond ((not comint-completion-addsuffix) "")
+                 ((stringp comint-completion-addsuffix)
+                  comint-completion-addsuffix)
+                 ((not (consp comint-completion-addsuffix)) " ")
+                 (t (cdr comint-completion-addsuffix))))
+      (set (make-local-variable 'pcomplete-command-completion-function)
+           #'shell-command-completion-function)
+      ;; Don't use pcomplete's defaulting mechanism, rely on
+      ;; shell-dynamic-complete-functions instead.
+      (set (make-local-variable 'pcomplete-default-completion-function) #'ignore)
+      (setq comint-input-autoexpand shell-input-autoexpand)
+      ;; Not needed in shell-mode because it's inherited from comint-mode, but
+      ;; placed here for read-shell-command.
+      (add-hook 'completion-at-point-functions 'comint-completion-at-point nil t))
+  #+END_SRC
+
+  One of the more important variables is the one highlighted above,
+  ~shell-dynamic-complete-functions~. This variable is [[https://github.com/emacs-mirror/emacs/blob/d97fbcbedce8f36050af7a55d34c6ed50c99507c/lisp/shell.el#L181-L193][defined earlier]]
+  in the file, and reproduced below.
+
+  #+BEGIN_SRC lisp
+    (defcustom shell-dynamic-complete-functions
+      '(comint-c-a-p-replace-by-expanded-history
+        shell-environment-variable-completion
+        shell-command-completion
+        shell-c-a-p-replace-by-expanded-directory
+        pcomplete-completions-at-point
+        shell-filename-completion
+        comint-filename-completion)
+      "List of functions called to perform completion.
+    This variable is used to initialize `comint-dynamic-complete-functions' in the
+    shell buffer."
+      :type '(repeat function)
+      :group 'shell)
+  #+END_SRC
+
+  As it turns out, the only interesting function in this list is
+  ~pcomplete-completions-at-point~. Hopping into the ~pcomplete~
+  [[https://github.com/emacs-mirror/emacs/blob/5022e27dac4c13651941e425dbec5b3a2cecdae4/lisp/pcomplete.el][source code]], we see this in the documentation at the top:
+
+  #+BEGIN_SRC lisp
+    ;; Here are the requirements for completion functions:
+    ;;
+    ;; @ They must be called "pcomplete/MAJOR-MODE/NAME", or
+    ;;   "pcomplete/NAME".  This is how they are looked up, using the NAME
+    ;;   specified in the command argument (the argument in first
+    ;;   position).
+  #+END_SRC
+
+  With this naming information in hand, we can check for what
+  functions of this format exist using =C-h f pcomplete/ TAB=, which
+  shows that there is a function called ~pcomplete/make~.
+
+  Github doesn't support searching a repository for queries with
+  slashes in them, so instead, we can clone the repository and find
+  that the function is defined in [[https://github.com/emacs-mirror/emacs/blob/master/lisp/pcmpl-gnu.el#L97-L105][lisp/pcmpl-gnu.el]], reproduced below:
+
+  #+BEGIN_SRC lisp
+    ;;;###autoload
+    (defun pcomplete/make ()
+      "Completion for GNU `make'."
+      (let ((pcomplete-help "(make)Top"))
+        (pcomplete-opt "bmC/def(pcmpl-gnu-makefile-names)hiI/j?kl?no.pqrsStvwW.")
+        (while (pcomplete-here (completion-table-in-turn
+                                (pcmpl-gnu-make-rule-names)
+                                (pcomplete-entries))
+                               nil 'identity))))
+  #+END_SRC
+
+  The ~pcomplete-opt~ can be ignored. The bulk of the code here is in
+  the ~pcmpl-gnu-make-rule-names~ function, which attempts to parse
+  the original Makefile for rule names, and returns a list of all the
+  targets. The source is explained below:
+
+  #+BEGIN_SRC lisp
+    (defun pcmpl-gnu-make-rule-names ()
+      "Return a list of possible make rule names in MAKEFILE."
+      (let* ((minus-f (member "-f" pcomplete-args))
+             (makefile (or (cadr minus-f)
+                           (cond
+                            ((file-exists-p "GNUmakefile") "GNUmakefile")
+                            ((file-exists-p "makefile") "makefile")
+                            (t "Makefile"))))
+             rules)
+  #+END_SRC
+
+  This part first checks if the ~-f~ option was passed to ~make~,
+  which is used to point ~make~ at a specific Makefile. If ~-f~ wasn't
+  passed, then it attempts to find one of the standard Makefile
+  filenames. Finally, we set up a local variable for us to store each
+  of the completion options.
+
+  #+BEGIN_SRC lisp
+    (if (not (file-readable-p makefile))
+        (unless minus-f (list "-f"))
+      (...))
+  #+END_SRC
+
+  In the body of the ~let~ statement, we first check if we can read
+  the Makefile that we found earlier. If we can't, then we tell
+  ~pcomplete~ that the only completion option is the ~-f~
+  one. Otherwise, we do the actual parsing of the Makefile.
+
+  #+BEGIN_SRC lisp
+    (with-temp-buffer
+      (ignore-errors                 ;Could be a directory or something.
+        (insert-file-contents makefile))
+      (while (re-search-forward
+              (concat "^\\s-*\\([^\n#%.$][^:=\n]*\\)\\s-*:[^=]") nil t)
+        (setq rules (append (split-string (match-string 1)) rules))))
+    (pcomplete-uniqify-list rules)
+  #+END_SRC
+
+  In order to make use of all the regular expression tools, we create
+  a buffer to play around in. Then we start processing each line of
+  the Makefile, checking for anything that matches ~target:
+  source~. At least, that's what it's supposed to do. Each part of the
+  regular expression annotated, with double backslashes replaced by a
+  single one.
+
+  * ~^\s-~ :: Match any whitespace character at the beginning of the
+              line. The ~\s~ isn't like in other regular expression
+              engines (where it typically stands for "whitespace" on
+              its own), and it actually takes a parameter for what
+              character class to match. In this case, the parameter is
+              ~-~, which stands for "whitespace characters".
+
+  * ~\( ... \)~ :: Capture the target of the rule
+
+  * ~[^\n#%.$]~ :: Match anything at the beginning of the line
+                   (excluding whitespace) that isn't:
+    * A newline (meaning we're looking at an empty line)
+    * A ~#~ (meaning we're looking at a comment)
+    * A ~%~ (meaning we're looking at a pattern rule)
+    * A ~.~ (meaning we're looking at a special target, like ~.PHONY~)
+    * A ~$~ (meaning we're looking at a variable target, like ~$(EXE):
+      $(OBJ)~)
+
+  * ~[^:=\n]*~ :: Match the remainder of the target, which disallows:
+    * Colons (signifies the end of the target part of the rule)
+    * Equal signs (signifies that this is a variable assignment)
+    * Newlines (signifies that this is not a rule, although it could
+      be a continuation of a rule)
+
+  * ~\\s-*:[^=]~ :: Matches any whitespace after the target and before
+                    the colon separating the rule into
+                    target/object. Then we check that the next
+                    character isn't an equal sign (because variable
+                    assignment can be in the for ~var :=
+                    val~).
+
+  Finally, we need to split the target string by spaces, because rules
+  could be of the form ~target1 target2: source~, and then append them
+  to our list of completions, and eventually return the unique list of
+  rules.

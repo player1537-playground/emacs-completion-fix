@@ -348,3 +348,49 @@
   could be of the form ~target1 target2: source~, and then append them
   to our list of completions, and eventually return the unique list of
   rules.
+
+  To recap, this is the path that lead us to ~pcomplete/make~:
+
+  #+BEGIN_SRC ditaa :file images/backtrace.png :cache yes
+    +-----------------------------------+
+    |           M–x shell–mode          |
+    +-----------------------------------+
+                      |
+                      v
+    +-----------------------------------+
+    |                TAB                |
+    +-----------------------------------+
+                      |
+                      v
+    +-----------------------------------+
+    |       shell–completion–vars       |
+    +-----------------------------------+
+                      |
+                      v
+    +-----------------------------------+
+    | shell–dynamic–complete–functions  |
+    +-----------------------------------+
+                      |
+                      v
+    +-----------------------------------+
+    |  pcomplete–completions–at–point   |
+    +-----------------------------------+
+                      |
+                      v
+    +-----------------------------------+
+    |          pcomplete/NAME           |
+    +-----------------------------------+
+                      |
+                      v
+    +-----------------------------------+
+    |         lisp/pcmpl–gnu.el         |
+    +-----------------------------------+
+                      |
+                      v
+    +-----------------------------------+
+    |          pcomplete/make           |
+    +-----------------------------------+
+  #+END_SRC
+
+  #+RESULTS[ca30c44701a492a36d2f7365714f705a4cb402ec]:
+  [[file:images/backtrace.png]]
